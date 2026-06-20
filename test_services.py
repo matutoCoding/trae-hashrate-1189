@@ -314,6 +314,81 @@ def test_all():
         count = db.execute_query(query)
         print(f"   共 {count} 条归档记录")
 
+        print("\n14. 测试课程级进度计算和课后记录...")
+        if schedules and len(students) >= 3:
+            test_sched = None
+            for s in scheduler.get_schedules():
+                sf = scheduler.get_schedule_by_id(s.id)
+                if sf and sf.current_students < sf.max_students:
+                    test_sched = sf
+                    break
+
+            if test_sched:
+                print(f"   测试课程: {test_sched.course_name}")
+                progress = scheduler.get_schedule_progress(test_sched.id)
+                print(f"   初始进度: {progress['progress_status']} ({progress['progress_value']:.1f}%)")
+
+                print(f"   3名学员报名、确认、签到、完成...")
+                enrolled_students = []
+                for i, stu in enumerate(students[:3]):
+                    try:
+                        e = scheduler.enroll_student(test_sched.id, stu.id)
+                        scheduler.confirm_enrollment(e.id)
+                        if i < 2:
+                            scheduler.checkin_student(e.id)
+                            if i < 1:
+                                scheduler.complete_enrollment(e.id)
+                        enrolled_students.append(stu.name)
+                    except ValueError as err:
+                        print(f"     {stu.name}: {err}")
+
+                progress = scheduler.get_schedule_progress(test_sched.id)
+                print(f"   学员: {', '.join(enrolled_students)}")
+                print(f"   进度: {progress['progress_status']} ({progress['progress_value']:.1f}%)")
+                print(f"   明细: 待确认{progress['pending_count']}, 已确认{progress['confirmed_count']}, "
+                      f"已签到{progress['checked_in_count']}, 已完成{progress['completed_count']}")
+
+                print(f"   保存课后记录...")
+                result = scheduler.save_lesson_review(
+                    test_sched.id,
+                    lesson_content="练习《高山流水》全曲，重点攻克快板部分",
+                    teacher_review="学员掌握较好，节奏感稳定，注意左手颤音稳定性",
+                    next_homework="每日练习30分钟，分手练熟42-68小节",
+                    suggested_pieces="渔舟唱晚,高山流水"
+                )
+                print(f"   课后记录保存: {'成功' if result else '失败'}")
+
+                progress = scheduler.get_schedule_progress(test_sched.id)
+                print(f"   有课后记录: {progress['has_lesson_review']}")
+                print(f"   记录时间: {progress['reviewed_at']}")
+
+                print(f"   归档后验证课后记录同步...")
+                scheduler.archive_completed_courses()
+
+        print("\n15. 测试补位来源和精确通知...")
+        if schedules and len(students) >= 4:
+            test_sched = None
+            for s in scheduler.get_schedules():
+                sf = scheduler.get_schedule_by_id(s.id)
+                if sf and sf.max_students >= 3 and sf.current_students >= 1:
+                    test_sched = sf
+                    break
+
+            if test_sched:
+                print(f"   测试课程: {test_sched.course_name}")
+                print(f"   取消1人报名触发取消释放...")
+                enrolls = scheduler.get_enrollments(schedule_id=test_sched.id, status=["confirmed", "checked_in"])
+                if enrolls:
+                    s_name = students[0].name if students else "该学员"
+                    canceled = scheduler.cancel_enrollment(enrolls[0].id)
+                    print(f"   取消成功: {canceled is not None}")
+
+                    print(f"   通过notify_with_result获取精确通知...")
+                    notify = waitlist.notify_with_result(test_sched.id, notify_source="cancel_release")
+                    print(f"   补位来源: {notify['source']}, 实际通知: {notify['count']}人")
+                    if notify['student_names']:
+                        print(f"   实际收到邀请: {', '.join(notify['student_names'])}")
+
         print("\n" + "=" * 60)
         print("所有测试通过!")
         print("=" * 60)

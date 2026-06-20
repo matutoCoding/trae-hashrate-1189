@@ -120,7 +120,7 @@ class WaitlistService:
             return entries
         return self.db.execute_query(query)
 
-    def process_waitlist_for_schedule(self, schedule_id):
+    def process_waitlist_for_schedule(self, schedule_id, notify_source="manual"):
         schedule = self.db.get_by_id(Schedule, schedule_id)
         if not schedule:
             return []
@@ -143,6 +143,7 @@ class WaitlistService:
             now = datetime.now()
             for entry in waiting_list:
                 entry.status = "notified"
+                entry.notify_source = notify_source
                 entry.notified_time = now
                 entry.confirm_deadline = now + timedelta(minutes=waitlist_confirm_minutes)
                 session.add(entry)
@@ -174,7 +175,7 @@ class WaitlistService:
             waitlist.status = "expired"
             waitlist.expired_time = now
             self.db.update(waitlist)
-            self.auto_notify_next(waitlist.schedule_id)
+            self.auto_notify_next(waitlist.schedule_id, notify_source="expired_release")
             return None
 
         schedule = self.db.get_by_id(Schedule, waitlist.schedule_id)
@@ -182,7 +183,7 @@ class WaitlistService:
             waitlist.status = "expired"
             waitlist.expired_time = now
             self.db.update(waitlist)
-            self.auto_notify_next(waitlist.schedule_id)
+            self.auto_notify_next(waitlist.schedule_id, notify_source="expired_release")
             return None
 
         try:
@@ -206,7 +207,7 @@ class WaitlistService:
             return True
         return False
 
-    def auto_notify_next(self, schedule_id):
+    def auto_notify_next(self, schedule_id, notify_source="cancel_release"):
         schedule = self.db.get_by_id(Schedule, schedule_id)
         if not schedule or schedule.current_students >= schedule.max_students:
             return []
@@ -226,6 +227,7 @@ class WaitlistService:
             now = datetime.now()
             for entry in waiting:
                 entry.status = "notified"
+                entry.notify_source = notify_source
                 entry.notified_time = now
                 entry.confirm_deadline = now + timedelta(minutes=waitlist_confirm_minutes)
                 session.add(entry)
@@ -254,10 +256,26 @@ class WaitlistService:
             session.commit()
 
             for sid in affected_schedule_ids:
-                self.auto_notify_next(sid)
+                self.auto_notify_next(sid, notify_source="expired_release")
 
             return list(expired)
         return self.db.execute_query(query)
+
+    def notify_with_result(self, schedule_id, notify_source="manual"):
+        result = self.process_waitlist_for_schedule(schedule_id, notify_source=notify_source)
+        student_names = []
+        from app.database.models import Student as StuModel
+        for entry in result:
+            s = self.scheduler.db.get_by_id(StuModel, entry.student_id)
+            if s:
+                student_names.append(s.name)
+        return {
+            "schedule_id": schedule_id,
+            "source": notify_source,
+            "count": len(result),
+            "entries": result,
+            "student_names": student_names
+        }
 
     def update_priority_score(self, waitlist_id, score):
         waitlist = self.db.get_by_id(Waitlist, waitlist_id)

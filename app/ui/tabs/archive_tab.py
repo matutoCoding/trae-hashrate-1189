@@ -2,11 +2,11 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QComboBox, QDateEdit, QMessageBox, QHeaderView,
     QGroupBox, QFormLayout, QAbstractItemView, QSplitter, QTabWidget,
-    QProgressBar, QFrame
+    QProgressBar, QFrame, QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QDate
 from datetime import datetime
-from app.database.models import Archive, MusicPiece, Enrollment
+from app.database.models import Archive, MusicPiece
 
 
 ENROLLMENT_STATUS_LABELS = {
@@ -19,6 +19,77 @@ ENROLLMENT_STATUS_LABELS = {
 }
 
 
+class ClickableStatCard(QFrame):
+    def __init__(self, title, data_dict, filter_key, filter_value, parent_tab):
+        super().__init__()
+        self.filter_key = filter_key
+        self.filter_value = filter_value
+        self.parent_tab = parent_tab
+
+        self.setFrameStyle(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                border: 1px solid #E0E0E0;
+                border-radius: 6px;
+                background: white;
+            }
+            QFrame:hover {
+                border: 1px solid #1976D2;
+                background: #F5F9FF;
+            }
+        """)
+        self.setCursor(Qt.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(12, 10, 12, 10)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #333;")
+        layout.addWidget(title_label)
+
+        total = data_dict.get("total", 0)
+        completed = data_dict.get("completed", 0)
+        cancelled = data_dict.get("cancelled", 0)
+        completion_rate = (completed / total * 100) if total > 0 else 0
+        cancel_rate = (cancelled / total * 100) if total > 0 else 0
+
+        total_label = QLabel(f"共 {total} 节")
+        total_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(total_label)
+
+        stats_row = QHBoxLayout()
+
+        completed_box = QVBoxLayout()
+        comp_num = QLabel(f"{completion_rate:.0f}%")
+        comp_num.setStyleSheet("font-size: 18px; font-weight: bold; color: #4CAF50;")
+        comp_num.setAlignment(Qt.AlignCenter)
+        comp_text = QLabel("完成率")
+        comp_text.setStyleSheet("font-size: 11px; color: #4CAF50;")
+        comp_text.setAlignment(Qt.AlignCenter)
+        completed_box.addWidget(comp_num)
+        completed_box.addWidget(comp_text)
+        stats_row.addLayout(completed_box)
+
+        cancelled_box = QVBoxLayout()
+        canc_num = QLabel(f"{cancel_rate:.0f}%")
+        canc_num.setStyleSheet("font-size: 18px; font-weight: bold; color: #F44336;")
+        canc_num.setAlignment(Qt.AlignCenter)
+        canc_text = QLabel("取消率")
+        canc_text.setStyleSheet("font-size: 11px; color: #F44336;")
+        canc_text.setAlignment(Qt.AlignCenter)
+        cancelled_box.addWidget(canc_num)
+        cancelled_box.addWidget(canc_text)
+        stats_row.addLayout(cancelled_box)
+
+        layout.addLayout(stats_row)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_tab.apply_analytics_filter(self.filter_key, self.filter_value)
+        super().mousePressEvent(event)
+
+
 class ArchiveTab(QWidget):
     def __init__(self, scheduler, recommender=None):
         super().__init__()
@@ -26,6 +97,7 @@ class ArchiveTab(QWidget):
         self.recommender = recommender
         self.current_archives = []
         self.current_pieces = []
+        self._active_filters = {}
         self._init_ui()
         self.load_data()
 
@@ -79,6 +151,31 @@ class ArchiveTab(QWidget):
             self.stats_widgets[key] = value_label
 
         layout.addWidget(stats_group)
+
+        analytics_group = QGroupBox("运营分析（点击卡片查看详情）")
+        analytics_layout = QHBoxLayout(analytics_group)
+
+        self.clear_filter_btn = QPushButton("清除分析筛选")
+        self.clear_filter_btn.clicked.connect(self.clear_analytics_filter)
+        self.clear_filter_btn.setEnabled(False)
+        self.clear_filter_btn.setStyleSheet("background: #FFEBEE;")
+        analytics_layout.addWidget(self.clear_filter_btn)
+
+        self.active_filter_label = QLabel("")
+        self.active_filter_label.setStyleSheet("color: #1976D2; font-weight: bold;")
+        analytics_layout.addWidget(self.active_filter_label, 1)
+
+        layout.addWidget(analytics_group)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMaximumHeight(180)
+        analytics_cards_widget = QWidget()
+        self.analytics_cards_layout = QHBoxLayout(analytics_cards_widget)
+        self.analytics_cards_layout.setSpacing(10)
+        self.analytics_cards_layout.addStretch()
+        scroll_area.setWidget(analytics_cards_widget)
+        layout.addWidget(scroll_area)
 
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("日期范围:"))
@@ -182,6 +279,8 @@ class ArchiveTab(QWidget):
 
         detail_layout.addRow(score_group)
 
+        right_layout.addWidget(detail_group)
+
         timeline_group = QGroupBox("报名过程")
         timeline_layout = QFormLayout(timeline_group)
         self.timeline_labels = {}
@@ -197,8 +296,25 @@ class ArchiveTab(QWidget):
             self.timeline_labels[key] = label
             timeline_layout.addRow(QLabel(f"{label_text}:"), label)
 
-        right_layout.addWidget(detail_group)
         right_layout.addWidget(timeline_group)
+
+        review_group = QGroupBox("课后复盘记录")
+        review_layout = QFormLayout(review_group)
+        self.review_labels = {}
+        review_items = [
+            ("lesson_content", "学习内容"),
+            ("teacher_review", "老师点评"),
+            ("next_homework", "下次作业"),
+            ("suggested_pieces", "建议曲目")
+        ]
+        for key, label_text in review_items:
+            label = QLabel("-")
+            label.setWordWrap(True)
+            label.setStyleSheet("color: #333;")
+            self.review_labels[key] = label
+            review_layout.addRow(QLabel(f"{label_text}:"), label)
+
+        right_layout.addWidget(review_group)
 
         music_group = QGroupBox("推荐学习曲目")
         music_layout = QVBoxLayout(music_group)
@@ -345,11 +461,21 @@ class ArchiveTab(QWidget):
             if exam_level_filter != "全部":
                 q = q.filter(Archive.student_exam_level == exam_level_filter)
 
+            if self._active_filters:
+                for key, value in self._active_filters.items():
+                    if key == "teacher_name":
+                        q = q.filter(Archive.teacher_name == value)
+                    elif key == "course_type":
+                        q = q.filter(Archive.course_type == value)
+                    elif key == "student_level":
+                        q = q.filter(Archive.student_level == value)
+
             return q.order_by(Archive.course_date.desc()).all()
 
         self.current_archives = self.scheduler.db.execute_query(query)
 
         self._update_statistics()
+        self._update_analytics_cards()
 
         self.archive_table.setRowCount(len(self.current_archives))
         for row, archive in enumerate(self.current_archives):
@@ -390,6 +516,98 @@ class ArchiveTab(QWidget):
             self.stats_widgets["cancelled_count"].setText("0")
             self.stats_widgets["pending_count"].setText("0")
 
+    def _update_analytics_cards(self):
+        while self.analytics_cards_layout.count() > 1:
+            item = self.analytics_cards_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        archives = self.current_archives
+
+        teacher_stats = {}
+        type_stats = {}
+        level_stats = {}
+
+        for a in archives:
+            key_t = a.teacher_name or "未知"
+            if key_t not in teacher_stats:
+                teacher_stats[key_t] = {"total": 0, "completed": 0, "cancelled": 0}
+            teacher_stats[key_t]["total"] += 1
+            if a.status == "completed":
+                teacher_stats[key_t]["completed"] += 1
+            if a.status in ["cancelled", "released"]:
+                teacher_stats[key_t]["cancelled"] += 1
+
+            key_ct = a.course_type or "未分类"
+            if key_ct not in type_stats:
+                type_stats[key_ct] = {"total": 0, "completed": 0, "cancelled": 0}
+            type_stats[key_ct]["total"] += 1
+            if a.status == "completed":
+                type_stats[key_ct]["completed"] += 1
+            if a.status in ["cancelled", "released"]:
+                type_stats[key_ct]["cancelled"] += 1
+
+            key_lv = a.student_level or "未知"
+            if key_lv not in level_stats:
+                level_stats[key_lv] = {"total": 0, "completed": 0, "cancelled": 0}
+            level_stats[key_lv]["total"] += 1
+            if a.status == "completed":
+                level_stats[key_lv]["completed"] += 1
+            if a.status in ["cancelled", "released"]:
+                level_stats[key_lv]["cancelled"] += 1
+
+        if teacher_stats:
+            teacher_group = QGroupBox("按老师")
+            teacher_layout = QHBoxLayout(teacher_group)
+            sorted_t = sorted(teacher_stats.items(), key=lambda x: -x[1]["total"])
+            for name, data in sorted_t[:6]:
+                card = ClickableStatCard(name, data, "teacher_name", name, self)
+                card.setMinimumWidth(140)
+                teacher_layout.addWidget(card)
+            self.analytics_cards_layout.insertWidget(0, teacher_group)
+
+        if type_stats:
+            type_group = QGroupBox("按课程类型")
+            type_layout = QHBoxLayout(type_group)
+            sorted_ct = sorted(type_stats.items(), key=lambda x: -x[1]["total"])
+            for name, data in sorted_ct[:4]:
+                card = ClickableStatCard(name, data, "course_type", name, self)
+                card.setMinimumWidth(140)
+                type_layout.addWidget(card)
+            self.analytics_cards_layout.insertWidget(1, type_group)
+
+        if level_stats:
+            level_group = QGroupBox("按学员级别")
+            level_layout = QHBoxLayout(level_group)
+            level_order = ["入门", "初级", "中级", "高级", "专业"]
+            sorted_lv = sorted(level_stats.items(), key=lambda x: (level_order.index(x[0]) if x[0] in level_order else 99))
+            for name, data in sorted_lv[:6]:
+                card = ClickableStatCard(name, data, "student_level", name, self)
+                card.setMinimumWidth(140)
+                level_layout.addWidget(card)
+            self.analytics_cards_layout.insertWidget(2, level_group)
+
+    def apply_analytics_filter(self, filter_key, filter_value):
+        self._active_filters = {filter_key: filter_value}
+        self.clear_filter_btn.setEnabled(True)
+        self.active_filter_label.setText(f"当前筛选：{self._filter_label(filter_key)} = {filter_value}")
+        self.load_archives()
+
+    def clear_analytics_filter(self):
+        self._active_filters = {}
+        self.clear_filter_btn.setEnabled(False)
+        self.active_filter_label.setText("")
+        self.load_archives()
+
+    def _filter_label(self, key):
+        mapping = {
+            "teacher_name": "老师",
+            "course_type": "课程类型",
+            "student_level": "学员级别"
+        }
+        return mapping.get(key, key)
+
     def _on_archive_selected(self):
         current_row = self.archive_table.currentRow()
         if current_row < 0 or current_row >= len(self.current_archives):
@@ -421,29 +639,16 @@ class ArchiveTab(QWidget):
                 val_label.setText("-")
                 bar.setValue(0)
 
-        for key in ["enroll_time", "confirm_time", "checkin_time", "complete_time", "cancel_time"]:
-            self.timeline_labels[key].setText("-")
+        for key, field in [("enroll_time", archive.enroll_time),
+                          ("confirm_time", archive.confirm_time),
+                          ("checkin_time", archive.checkin_time),
+                          ("complete_time", archive.complete_time),
+                          ("cancel_time", archive.cancel_time)]:
+            self.timeline_labels[key].setText(field.strftime("%Y-%m-%d %H:%M:%S") if field else "-")
 
-        def query_timeline(session):
-            if archive.schedule_id and archive.student_id:
-                return session.query(Enrollment).filter(
-                    Enrollment.schedule_id == archive.schedule_id,
-                    Enrollment.student_id == archive.student_id
-                ).first()
-            return None
-
-        enrollment = self.scheduler.db.execute_query(query_timeline)
-        if enrollment:
-            timeline_keys = [
-                ("enroll_time", enrollment.enroll_time),
-                ("confirm_time", enrollment.confirm_time),
-                ("checkin_time", enrollment.checkin_time),
-                ("complete_time", enrollment.complete_time),
-                ("cancel_time", enrollment.cancel_time)
-            ]
-            for key, val in timeline_keys:
-                if val:
-                    self.timeline_labels[key].setText(val.strftime("%Y-%m-%d %H:%M:%S"))
+        for key in ["lesson_content", "teacher_review", "next_homework", "suggested_pieces"]:
+            val = getattr(archive, key, None)
+            self.review_labels[key].setText(val or "（暂无记录）")
 
         self._load_recommended_music(archive)
 
@@ -480,6 +685,10 @@ class ArchiveTab(QWidget):
                 if piece.exam_level == student_exam_level:
                     score += 20
 
+            if archive.suggested_pieces:
+                if piece.name in archive.suggested_pieces:
+                    score += 100
+
             if score > 0:
                 matched.append((piece, score))
 
@@ -487,7 +696,10 @@ class ArchiveTab(QWidget):
 
         self.recommended_music_list.setRowCount(len(matched[:10]))
         for row, (piece, score) in enumerate(matched[:10]):
-            self.recommended_music_list.setItem(row, 0, QTableWidgetItem(piece.name))
+            name = piece.name
+            if score >= 100:
+                name += " ★推荐"
+            self.recommended_music_list.setItem(row, 0, QTableWidgetItem(name))
             self.recommended_music_list.setItem(row, 1, QTableWidgetItem(piece.composer or "-"))
             self.recommended_music_list.setItem(row, 2, QTableWidgetItem(piece.difficulty_level or "-"))
             self.recommended_music_list.setItem(row, 3, QTableWidgetItem(piece.exam_level or "-"))

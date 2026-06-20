@@ -23,13 +23,27 @@ class SchedulerService:
         "released": "已释放"
     }
 
+    NOTIFY_SOURCE_CANCEL = "cancel_release"
+    NOTIFY_SOURCE_EXPIRED = "expired_release"
+    NOTIFY_SOURCE_MANUAL = "manual"
+
+    NOTIFY_SOURCE_LABELS = {
+        "cancel_release": "取消释放",
+        "expired_release": "过期释放",
+        "manual": "手动处理"
+    }
+
     def __init__(self, db_manager):
         self.db = db_manager
         self.settings = AppSettings()
         self._on_release_callback = None
+        self._status_change_callback = None
 
     def set_release_callback(self, callback):
         self._on_release_callback = callback
+
+    def set_status_change_callback(self, callback):
+        self._status_change_callback = callback
 
     def add_room(self, name, location=None, capacity=1, equipment=None, status="active"):
         room = Room(name=name, location=location, capacity=capacity, equipment=equipment, status=status)
@@ -273,7 +287,18 @@ class SchedulerService:
                     self._on_release_callback(enrollment.schedule_id)
                 except Exception:
                     pass
-        return self.db.update(enrollment)
+            if self._status_change_callback:
+                try:
+                    self._status_change_callback(enrollment.schedule_id)
+                except Exception:
+                    pass
+        result = self.db.update(enrollment)
+        if self._status_change_callback:
+            try:
+                self._status_change_callback(enrollment.schedule_id)
+            except Exception:
+                pass
+        return result
 
     def confirm_enrollment(self, enrollment_id):
         return self.transition_enrollment(enrollment_id, "confirmed")
@@ -286,6 +311,104 @@ class SchedulerService:
 
     def cancel_enrollment(self, enrollment_id):
         return self.transition_enrollment(enrollment_id, "cancelled")
+
+    def get_schedule_progress(self, schedule_id):
+        def query(session):
+            schedule = session.query(Schedule).filter(Schedule.id == schedule_id).first()
+            if not schedule:
+                return None
+            enrollments = session.query(Enrollment).filter(
+                Enrollment.schedule_id == schedule_id
+            ).all()
+            total = len(enrollments)
+            if total == 0:
+                total = schedule.max_students or 1
+            pending = len([e for e in enrollments if e.status == "pending"])
+            confirmed = len([e for e in enrollments if e.status == "confirmed"])
+            checked_in = len([e for e in enrollments if e.status == "checked_in"])
+            completed = len([e for e in enrollments if e.status == "completed"])
+            cancelled = len([e for e in enrollments if e.status in ["cancelled", "released"]])
+            active = total - cancelled
+
+            progress_status = "未开始"
+            progress_value = 0.0
+
+            if active > 0:
+                if completed == active and active > 0:
+                    progress_status = "全部完成"
+                    progress_value = 100.0
+                elif cancelled == total and total > 0:
+                    progress_status = "全部取消"
+                    progress_value = 0.0
+                elif checked_in + completed > 0:
+                    in_class = checked_in + completed
+                    progress_status = "上课中" if checked_in > 0 else "已签到"
+                    progress_value = round((in_class / active) * 100, 1)
+                elif confirmed > 0:
+                    progress_status = "已确认待上课"
+                    progress_value = round((confirmed / active) * 30, 1)
+                elif pending > 0:
+                    progress_status = "待确认"
+                    progress_value = round((pending / active) * 10, 1)
+
+            has_lesson_review = bool(schedule.lesson_content or schedule.teacher_review or schedule.next_homework)
+
+            return {
+                "schedule_id": schedule_id,
+                "schedule_status": schedule.status,
+                "progress_status": progress_status,
+                "progress_value": progress_value,
+                "total_enrolled": total,
+                "active_students": active,
+                "pending_count": pending,
+                "confirmed_count": confirmed,
+                "checked_in_count": checked_in,
+                "completed_count": completed,
+                "cancelled_count": cancelled,
+                "has_lesson_review": has_lesson_review,
+                "lesson_content": schedule.lesson_content,
+                "teacher_review": schedule.teacher_review,
+                "next_homework": schedule.next_homework,
+                "suggested_pieces": schedule.suggested_pieces,
+                "reviewed_at": schedule.reviewed_at
+            }
+        return self.db.execute_query(query)
+
+    def save_lesson_review(self, schedule_id, lesson_content=None, teacher_review=None, next_homework=None, suggested_pieces=None):
+        def query(session):
+            schedule = session.query(Schedule).filter(Schedule.id == schedule_id).first()
+            if not schedule:
+                return False
+            if lesson_content is not None:
+                schedule.lesson_content = lesson_content
+            if teacher_review is not None:
+                schedule.teacher_review = teacher_review
+            if next_homework is not None:
+                schedule.next_homework = next_homework
+            if suggested_pieces is not None:
+                schedule.suggested_pieces = suggested_pieces
+            schedule.reviewed_at = datetime.now()
+            session.add(schedule)
+            session.commit()
+            return True
+        return self.db.execute_query(query)
+
+    def update_schedule_status(self, schedule_id, new_status):
+        def query(session):
+            schedule = session.query(Schedule).filter(Schedule.id == schedule_id).first()
+            if not schedule:
+                return None
+            schedule.status = new_status
+            session.add(schedule)
+            session.commit()
+            return schedule
+        result = self.db.execute_query(query)
+        if result and self._status_change_callback:
+            try:
+                self._status_change_callback(schedule_id)
+            except Exception:
+                pass
+        return result
 
     def get_enrollment_by_id(self, enrollment_id):
         return self.db.get_by_id(Enrollment, enrollment_id)
@@ -387,6 +510,15 @@ class SchedulerService:
                         level_score=rec_log.level_score if rec_log else None,
                         availability_score=rec_log.availability_score if rec_log else None,
                         experience_score=rec_log.experience_score if rec_log else None,
+                        lesson_content=schedule.lesson_content,
+                        teacher_review=schedule.teacher_review,
+                        next_homework=schedule.next_homework,
+                        suggested_pieces=schedule.suggested_pieces,
+                        enroll_time=enrollment.enroll_time,
+                        confirm_time=enrollment.confirm_time,
+                        checkin_time=enrollment.checkin_time,
+                        complete_time=enrollment.complete_time,
+                        cancel_time=enrollment.cancel_time,
                         notes=enrollment.notes
                     )
                     session.add(archive)

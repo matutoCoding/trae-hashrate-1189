@@ -18,6 +18,12 @@ STATUS_LABELS = {
     "cancelled": "已取消"
 }
 
+SOURCE_LABELS = {
+    "cancel_release": "取消释放",
+    "expired_release": "过期释放",
+    "manual": "手动处理"
+}
+
 
 class WaitlistTab(QWidget):
     def __init__(self, waitlist_service, scheduler):
@@ -71,9 +77,9 @@ class WaitlistTab(QWidget):
         waitlist_layout = QVBoxLayout(waitlist_group)
 
         self.waitlist_table = QTableWidget()
-        self.waitlist_table.setColumnCount(10)
+        self.waitlist_table.setColumnCount(11)
         self.waitlist_table.setHorizontalHeaderLabels([
-            "ID", "队列位置", "优先级", "学员", "课程", "状态", "通知时间", "确认截止", "剩余时间", "创建时间"
+            "ID", "队列位置", "优先级", "学员", "课程", "状态", "补位来源", "通知时间", "确认截止", "剩余时间", "创建时间"
         ])
         self.waitlist_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.waitlist_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -87,9 +93,9 @@ class WaitlistTab(QWidget):
         notified_layout = QVBoxLayout(notified_group)
 
         self.notified_table = QTableWidget()
-        self.notified_table.setColumnCount(7)
+        self.notified_table.setColumnCount(8)
         self.notified_table.setHorizontalHeaderLabels([
-            "ID", "学员", "课程", "通知时间", "确认截止", "剩余时间", "状态"
+            "ID", "学员", "课程", "补位来源", "通知时间", "确认截止", "剩余时间", "状态"
         ])
         self.notified_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.notified_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -176,13 +182,15 @@ class WaitlistTab(QWidget):
             schedule = self.scheduler.db.get_by_id(Schedule, entry.schedule_id)
             self.waitlist_table.setItem(row, 4, QTableWidgetItem(schedule.course_name if schedule else "-"))
             self.waitlist_table.setItem(row, 5, QTableWidgetItem(STATUS_LABELS.get(entry.status, entry.status)))
+            source = SOURCE_LABELS.get(entry.notify_source, "-") if entry.notify_source else "-"
+            self.waitlist_table.setItem(row, 6, QTableWidgetItem(source))
             notified = entry.notified_time.strftime("%m-%d %H:%M") if entry.notified_time else "-"
-            self.waitlist_table.setItem(row, 6, QTableWidgetItem(notified))
+            self.waitlist_table.setItem(row, 7, QTableWidgetItem(notified))
             deadline = entry.confirm_deadline.strftime("%m-%d %H:%M") if entry.confirm_deadline else "-"
-            self.waitlist_table.setItem(row, 7, QTableWidgetItem(deadline))
+            self.waitlist_table.setItem(row, 8, QTableWidgetItem(deadline))
             remaining = self._calc_remaining(entry)
-            self.waitlist_table.setItem(row, 8, QTableWidgetItem(remaining))
-            self.waitlist_table.setItem(row, 9, QTableWidgetItem(entry.created_at.strftime("%m-%d %H:%M")))
+            self.waitlist_table.setItem(row, 9, QTableWidgetItem(remaining))
+            self.waitlist_table.setItem(row, 10, QTableWidgetItem(entry.created_at.strftime("%m-%d %H:%M")))
 
         self._load_notified_table()
         self._update_stats()
@@ -208,10 +216,12 @@ class WaitlistTab(QWidget):
             self.notified_table.setItem(row, 1, QTableWidgetItem(student.name if student else "-"))
             schedule = self.scheduler.db.get_by_id(Schedule, entry.schedule_id)
             self.notified_table.setItem(row, 2, QTableWidgetItem(schedule.course_name if schedule else "-"))
+            source = SOURCE_LABELS.get(entry.notify_source, "-") if entry.notify_source else "-"
+            self.notified_table.setItem(row, 3, QTableWidgetItem(source))
             notified = entry.notified_time.strftime("%m-%d %H:%M:%S") if entry.notified_time else "-"
-            self.notified_table.setItem(row, 3, QTableWidgetItem(notified))
+            self.notified_table.setItem(row, 4, QTableWidgetItem(notified))
             deadline = item["deadline"].strftime("%m-%d %H:%M:%S") if item["deadline"] else "-"
-            self.notified_table.setItem(row, 4, QTableWidgetItem(deadline))
+            self.notified_table.setItem(row, 5, QTableWidgetItem(deadline))
             remaining_sec = item["remaining_seconds"]
             if remaining_sec <= 0:
                 remaining_text = "已过期"
@@ -219,8 +229,8 @@ class WaitlistTab(QWidget):
                 m = int(remaining_sec // 60)
                 s = int(remaining_sec % 60)
                 remaining_text = f"{m}分{s}秒"
-            self.notified_table.setItem(row, 5, QTableWidgetItem(remaining_text))
-            self.notified_table.setItem(row, 6, QTableWidgetItem("已过期" if item["is_expired"] else "待确认"))
+            self.notified_table.setItem(row, 6, QTableWidgetItem(remaining_text))
+            self.notified_table.setItem(row, 7, QTableWidgetItem("已过期" if item["is_expired"] else "待确认"))
 
     def _refresh_notified_remaining(self):
         self._load_notified_table()
@@ -268,17 +278,33 @@ class WaitlistTab(QWidget):
             QMessageBox.warning(self, "提示", "请先选择课程")
             return
 
-        notified = self.waitlist.process_waitlist_for_schedule(schedule_id)
-        if notified:
-            QMessageBox.information(self, "成功", f"已通知 {len(notified)} 名候补学员")
+        result = self.waitlist.notify_with_result(schedule_id, notify_source="manual")
+        count = result.get("count", 0)
+        names = result.get("student_names", [])
+
+        if count > 0:
+            msg = f"已实际通知 {count} 名候补学员：\n\n"
+            msg += "\n".join([f"  {i+1}. {n}" for i, n in enumerate(names)])
+            msg += f"\n\n补位来源：{SOURCE_LABELS.get('manual', '手动处理')}"
+            QMessageBox.information(self, "补位通知已发出", msg)
             self.load_data()
         else:
-            QMessageBox.information(self, "提示", "没有可以补位的名额或没有候补学员")
+            reason_msg = "可能的原因：\n1. 暂无等待中的候补学员\n2. 没有空余名额\n3. 已有已通知待确认的学员（已算作占位）"
+            QMessageBox.information(self, "暂无可通知学员",
+                f"本次未发出任何补位邀请。\n\n{reason_msg}")
 
     def check_expired(self):
         expired = self.waitlist.check_expired_notifications()
         if expired:
-            QMessageBox.information(self, "完成", f"处理了 {len(expired)} 个过期通知，已自动通知下一位候补")
+            student_names = []
+            for entry in expired:
+                s = self.scheduler.db.get_by_id(Student, entry.student_id)
+                if s:
+                    student_names.append(s.name)
+            msg = f"处理了 {len(expired)} 个过期通知：\n\n"
+            msg += "\n".join([f"  • {n}" for n in student_names])
+            msg += "\n\n系统已自动通知下一位候补学员（补位来源：过期释放）"
+            QMessageBox.information(self, "处理完成", msg)
             self.load_data()
         else:
             QMessageBox.information(self, "完成", "没有过期的通知")
@@ -293,12 +319,22 @@ class WaitlistTab(QWidget):
             QMessageBox.warning(self, "提示", "只有已通知的候补记录才能确认报名")
             return
 
-        result = self.waitlist.confirm_waitlist_enrollment(entry.id)
-        if result:
-            QMessageBox.information(self, "成功", "候补学员已成功报名，课程人数已同步更新")
-            self.load_data()
-        else:
-            QMessageBox.warning(self, "失败", "确认失败，可能名额已被占用、通知已过期或课程已满")
+        student = self.scheduler.db.get_by_id(Student, entry.student_id)
+        schedule = self.scheduler.db.get_by_id(Schedule, entry.schedule_id)
+        name = student.name if student else "该学员"
+        course = schedule.course_name if schedule else ""
+
+        reply = QMessageBox.question(self, "确认",
+            f"确定要确认 {name} 的补位报名吗？\n\n课程：{course}")
+        if reply == QMessageBox.Yes:
+            result = self.waitlist.confirm_waitlist_enrollment(entry.id)
+            if result:
+                QMessageBox.information(self, "成功",
+                    f"{name} 已成功补位报名！\n\n课程人数已同步更新。")
+                self.load_data()
+            else:
+                QMessageBox.warning(self, "失败",
+                    "确认失败，可能名额已被占用、通知已过期或课程已满")
 
     def decline_offer(self):
         entry = self._get_selected_entry()
@@ -306,10 +342,22 @@ class WaitlistTab(QWidget):
             QMessageBox.warning(self, "提示", "请先选择候补记录")
             return
 
-        reply = QMessageBox.question(self, "确认", "确定要拒绝该补位邀请吗？拒绝后系统将自动通知下一位候补。")
+        student = self.scheduler.db.get_by_id(Student, entry.student_id)
+        name = student.name if student else "该学员"
+
+        reply = QMessageBox.question(self, "确认",
+            f"确定要让 {name} 拒绝该补位邀请吗？\n\n"
+            "拒绝后系统将自动通知下一位候补学员。")
         if reply == QMessageBox.Yes:
             if self.waitlist.decline_waitlist_offer(entry.id):
-                QMessageBox.information(self, "成功", "已拒绝，已自动通知下一位候补")
+                next_result = self.waitlist.notify_with_result(entry.schedule_id, notify_source="cancel_release")
+                next_names = next_result.get("student_names", [])
+                if next_names:
+                    msg = f"{name} 已拒绝补位。\n\n系统已自动通知下一位候补：\n"
+                    msg += "\n".join([f"  • {n}" for n in next_names])
+                    QMessageBox.information(self, "成功", msg)
+                else:
+                    QMessageBox.information(self, "成功", f"{name} 已拒绝补位，暂无下一位候补学员。")
                 self.load_data()
 
     def remove_from_waitlist(self):
