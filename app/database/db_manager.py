@@ -85,9 +85,9 @@ class DatabaseManager:
                         query = query.filter(getattr(model_class, key).in_(value))
                     else:
                         query = query.filter(getattr(model_class, key) == value)
-            if order_by:
+            if order_by is not None:
                 query = query.order_by(order_by)
-            if limit:
+            if limit is not None:
                 query = query.limit(limit)
             return query.all()
         finally:

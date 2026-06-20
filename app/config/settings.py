@@ -10,6 +10,7 @@ class AppSettings:
         self.default_settings = {
             "theme": "light",
             "auto_release_minutes": 15,
+            "waitlist_confirm_minutes": 30,
             "notification_enabled": True,
             "recommend_weights": {
                 "style_match": 0.30,

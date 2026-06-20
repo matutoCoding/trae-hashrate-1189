@@ -26,17 +26,14 @@ class WaitlistService:
         existing_enroll = self.db.query(Enrollment, filters={
             "schedule_id": schedule_id,
             "student_id": student_id,
-            "status": ["enrolled", "confirmed"]
+            "status": ["pending", "confirmed", "checked_in"]
         })
         if existing_enroll:
             raise ValueError("该学生已报名此课程")
 
         def query(session):
             current_count = session.query(Waitlist).filter(
-                and_(
-                    Waitlist.schedule_id == schedule_id,
-                    Waitlist.status == "waiting"
-                )
+                and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
             ).count()
 
             waitlist_entry = Waitlist(
@@ -64,10 +61,7 @@ class WaitlistService:
     def _reorder_queue(self, schedule_id):
         def query(session):
             waiting = session.query(Waitlist).filter(
-                and_(
-                    Waitlist.schedule_id == schedule_id,
-                    Waitlist.status == "waiting"
-                )
+                and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
             ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).all()
 
             for idx, entry in enumerate(waiting, 1):
@@ -77,14 +71,17 @@ class WaitlistService:
             session.commit()
         return self.db.execute_query(query)
 
-    def get_waitlist(self, schedule_id=None, student_id=None, status="waiting"):
+    def get_waitlist(self, schedule_id=None, student_id=None, status=None):
         filters = {}
         if schedule_id:
             filters["schedule_id"] = schedule_id
         if student_id:
             filters["student_id"] = student_id
         if status:
-            filters["status"] = status
+            if isinstance(status, list):
+                filters["status"] = status
+            else:
+                filters["status"] = status
 
         def query(session):
             q = session.query(Waitlist)
@@ -93,8 +90,34 @@ class WaitlistService:
             if student_id:
                 q = q.filter(Waitlist.student_id == student_id)
             if status:
-                q = q.filter(Waitlist.status == status)
+                if isinstance(status, list):
+                    q = q.filter(Waitlist.status.in_(status))
+                else:
+                    q = q.filter(Waitlist.status == status)
             return q.order_by(Waitlist.queue_position).all()
+        return self.db.execute_query(query)
+
+    def get_notified_with_remaining(self, schedule_id=None):
+        waitlist_confirm_minutes = self.settings.get("waitlist_confirm_minutes", 30)
+        now = datetime.now()
+
+        def query(session):
+            q = session.query(Waitlist).filter(Waitlist.status == "notified")
+            if schedule_id:
+                q = q.filter(Waitlist.schedule_id == schedule_id)
+            results = q.order_by(Waitlist.notified_time).all()
+
+            entries = []
+            for entry in results:
+                deadline = entry.confirm_deadline or (entry.notified_time + timedelta(minutes=waitlist_confirm_minutes) if entry.notified_time else None)
+                remaining = max(0, (deadline - now).total_seconds()) if deadline else 0
+                entries.append({
+                    "entry": entry,
+                    "remaining_seconds": remaining,
+                    "deadline": deadline,
+                    "is_expired": remaining <= 0
+                })
+            return entries
         return self.db.execute_query(query)
 
     def process_waitlist_for_schedule(self, schedule_id):
@@ -106,19 +129,19 @@ class WaitlistService:
             return []
 
         available_slots = schedule.max_students - schedule.current_students
+        waitlist_confirm_minutes = self.settings.get("waitlist_confirm_minutes", 30)
         notified = []
 
         def query(session):
             waiting_list = session.query(Waitlist).filter(
-                and_(
-                    Waitlist.schedule_id == schedule_id,
-                    Waitlist.status == "waiting"
-                )
+                and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
             ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(available_slots).all()
 
+            now = datetime.now()
             for entry in waiting_list:
                 entry.status = "notified"
-                entry.notified_time = datetime.now()
+                entry.notified_time = now
+                entry.confirm_deadline = now + timedelta(minutes=waitlist_confirm_minutes)
                 session.add(entry)
                 notified.append(entry)
 
@@ -131,25 +154,26 @@ class WaitlistService:
         if not waitlist or waitlist.status != "notified":
             return None
 
+        now = datetime.now()
+        if waitlist.confirm_deadline and now > waitlist.confirm_deadline:
+            waitlist.status = "expired"
+            waitlist.expired_time = now
+            self.db.update(waitlist)
+            self.auto_notify_next(waitlist.schedule_id)
+            return None
+
         schedule = self.db.get_by_id(Schedule, waitlist.schedule_id)
         if not schedule or schedule.current_students >= schedule.max_students:
             waitlist.status = "expired"
-            waitlist.expired_time = datetime.now()
+            waitlist.expired_time = now
             self.db.update(waitlist)
-            return None
-
-        auto_release_minutes = self.settings.get("auto_release_minutes", 15)
-        if waitlist.notified_time and datetime.now() - waitlist.notified_time > timedelta(minutes=auto_release_minutes):
-            waitlist.status = "expired"
-            waitlist.expired_time = datetime.now()
-            self.db.update(waitlist)
-            self._reorder_queue(waitlist.schedule_id)
+            self.auto_notify_next(waitlist.schedule_id)
             return None
 
         try:
             enrollment = self.scheduler.enroll_student(waitlist.schedule_id, waitlist.student_id)
             waitlist.status = "enrolled"
-            waitlist.enrolled_time = datetime.now()
+            waitlist.enrolled_time = now
             self.db.update(waitlist)
             self._reorder_queue(waitlist.schedule_id)
             return enrollment
@@ -162,48 +186,58 @@ class WaitlistService:
             waitlist.status = "declined"
             self.db.update(waitlist)
             self._reorder_queue(waitlist.schedule_id)
+            self.auto_notify_next(waitlist.schedule_id)
             return True
         return False
 
+    def auto_notify_next(self, schedule_id):
+        schedule = self.db.get_by_id(Schedule, schedule_id)
+        if not schedule or schedule.current_students >= schedule.max_students:
+            return []
+
+        waitlist_confirm_minutes = self.settings.get("waitlist_confirm_minutes", 30)
+        notified = []
+
+        def query(session):
+            available = schedule.max_students - schedule.current_students
+            waiting = session.query(Waitlist).filter(
+                and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
+            ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(available).all()
+
+            now = datetime.now()
+            for entry in waiting:
+                entry.status = "notified"
+                entry.notified_time = now
+                entry.confirm_deadline = now + timedelta(minutes=waitlist_confirm_minutes)
+                session.add(entry)
+                notified.append(entry)
+
+            session.commit()
+            return notified
+        return self.db.execute_query(query)
+
     def check_expired_notifications(self):
-        auto_release_minutes = self.settings.get("auto_release_minutes", 15)
         now = datetime.now()
-        threshold = now - timedelta(minutes=auto_release_minutes)
+        waitlist_confirm_minutes = self.settings.get("waitlist_confirm_minutes", 30)
 
         def query(session):
             expired = session.query(Waitlist).filter(
-                and_(
-                    Waitlist.status == "notified",
-                    Waitlist.notified_time < threshold
-                )
+                and_(Waitlist.status == "notified", Waitlist.confirm_deadline < now)
             ).all()
 
-            result = []
+            affected_schedule_ids = set()
             for entry in expired:
                 entry.status = "expired"
                 entry.expired_time = now
                 session.add(entry)
-                result.append(entry)
+                affected_schedule_ids.add(entry.schedule_id)
 
             session.commit()
 
-            for entry in result:
-                waiting = session.query(Waitlist).filter(
-                    and_(
-                        Waitlist.schedule_id == entry.schedule_id,
-                        Waitlist.status == "waiting"
-                    )
-                ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(1).first()
+            for sid in affected_schedule_ids:
+                self.auto_notify_next(sid)
 
-                if waiting:
-                    schedule = session.query(Schedule).filter(Schedule.id == entry.schedule_id).first()
-                    if schedule and schedule.current_students < schedule.max_students:
-                        waiting.status = "notified"
-                        waiting.notified_time = now
-                        session.add(waiting)
-
-            session.commit()
-            return result
+            return list(expired)
         return self.db.execute_query(query)
 
     def update_priority_score(self, waitlist_id, score):
@@ -221,6 +255,9 @@ class WaitlistService:
             waiting = session.query(Waitlist).filter(
                 and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
             ).count()
+            notified = session.query(Waitlist).filter(
+                and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "notified")
+            ).count()
             enrolled = session.query(Waitlist).filter(
                 and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "enrolled")
             ).count()
@@ -231,6 +268,7 @@ class WaitlistService:
             return {
                 "total": total,
                 "waiting": waiting,
+                "notified": notified,
                 "enrolled": enrolled,
                 "expired_declined": expired
             }

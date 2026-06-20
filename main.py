@@ -24,6 +24,7 @@ def main():
     scheduler = SchedulerService(db_manager)
     recommender = RecommenderService(db_manager)
     waitlist = WaitlistService(db_manager, scheduler)
+    scheduler.set_release_callback(waitlist.auto_notify_next)
 
     window = MainWindow(db_manager, scheduler, recommender, waitlist)
     window.show()

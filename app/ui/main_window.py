@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
         self.schedule_tab = ScheduleTab(self.scheduler, self.recommender, self.waitlist)
         self.waitlist_tab = WaitlistTab(self.waitlist, self.scheduler)
         self.recommend_tab = RecommendTab(self.recommender, self.scheduler)
-        self.archive_tab = ArchiveTab(self.scheduler)
+        self.archive_tab = ArchiveTab(self.scheduler, self.recommender)
         self.settings_tab = SettingsTab(self.settings, self.recommender)
 
         self.tabs.addTab(self.schedule_tab, "课程排期")

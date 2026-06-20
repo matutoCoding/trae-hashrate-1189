@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QComboBox, QMessageBox, QHeaderView,
     QGroupBox, QFormLayout, QDoubleSpinBox, QAbstractItemView,
-    QSplitter, QListWidget, QListWidgetItem, QProgressBar
+    QSplitter, QListWidget, QListWidgetItem, QProgressBar, QTextEdit
 )
 from PySide6.QtCore import Qt
 
@@ -13,6 +13,7 @@ class RecommendTab(QWidget):
         self.recommender = recommender
         self.scheduler = scheduler
         self.current_recommendations = []
+        self.current_match_records = []
         self._init_ui()
         self.load_data()
 
@@ -124,13 +125,27 @@ class RecommendTab(QWidget):
 
         right_layout.addWidget(detail_group)
 
+        reason_group = QGroupBox("推荐原因")
+        reason_layout = QVBoxLayout(reason_group)
+        self.reason_label = QLabel("选择推荐结果后查看推荐原因")
+        self.reason_label.setWordWrap(True)
+        self.reason_label.setStyleSheet("padding: 8px; background: rgba(33,150,243,0.08); border-radius: 4px; line-height: 1.6;")
+        reason_layout.addWidget(self.reason_label)
+
+        self.save_match_btn = QPushButton("保存为撮合记录")
+        self.save_match_btn.clicked.connect(self.save_as_match)
+        self.save_match_btn.setEnabled(False)
+        reason_layout.addWidget(self.save_match_btn)
+
+        right_layout.addWidget(reason_group)
+
         info_group = QGroupBox("老师信息")
         info_layout = QFormLayout(info_group)
         self.teacher_info_labels = {}
-        for key in ["name", "level", "styles", "rating", "experience_years", "phone"]:
+        for key, label_text in [("name", "姓名"), ("level", "级别"), ("styles", "擅长曲风"), ("rating", "评分"), ("experience_years", "教学经验"), ("phone", "联系电话")]:
             label = QLabel("-")
             self.teacher_info_labels[key] = label
-            info_layout.addRow(QLabel(f"{key}:"), label)
+            info_layout.addRow(QLabel(f"{label_text}:"), label)
         right_layout.addWidget(info_group)
 
         right_layout.addStretch()
@@ -242,6 +257,9 @@ class RecommendTab(QWidget):
                 self.score_labels[key][0].setText(f"{value:.4f}")
                 self.score_labels[key][1].setValue(int(value * 100))
 
+        reason = rec.get("reason_text", "")
+        self.reason_label.setText(reason if reason else "暂无推荐原因")
+
         teacher = rec.get("teacher")
         if teacher:
             self.teacher_info_labels["name"].setText(teacher.name or "-")
@@ -250,6 +268,32 @@ class RecommendTab(QWidget):
             self.teacher_info_labels["rating"].setText(f"{teacher.rating:.1f}" if teacher.rating else "-")
             self.teacher_info_labels["experience_years"].setText(f"{teacher.experience_years} 年" if teacher.experience_years else "-")
             self.teacher_info_labels["phone"].setText(teacher.phone or "-")
+
+        self.save_match_btn.setEnabled(True)
+
+    def save_as_match(self):
+        current_row = self.result_table.currentRow()
+        if current_row < 0 or current_row >= len(self.current_recommendations):
+            return
+
+        rec = self.current_recommendations[current_row]
+        student = rec.get("student")
+        teacher = rec.get("teacher")
+        if not student or not teacher:
+            return
+
+        reply = QMessageBox.question(self, "确认",
+            f"确定要将「{student.name}」与「{teacher.name}」的推荐保存为撮合记录吗？\n匹配度: {rec['total_score']:.2%}")
+        if reply == QMessageBox.Yes:
+            from app.database.models import RecommendationLog
+            logs = self.recommender.get_recommendation_history(
+                student_id=student.id, teacher_id=teacher.id, limit=1
+            )
+            if logs:
+                self.recommender.save_as_match(logs[0].id)
+                QMessageBox.information(self, "成功", "已保存为撮合记录")
+            else:
+                QMessageBox.warning(self, "提示", "未找到对应的推荐记录")
 
     def save_weights(self):
         new_weights = {}

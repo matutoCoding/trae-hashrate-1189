@@ -6,9 +6,26 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate
 from datetime import datetime, timedelta
-from app.database.models import Schedule, Enrollment
+from app.database.models import Schedule, Enrollment, Student
 from app.ui.dialogs.schedule_dialog import ScheduleDialog
 from app.ui.dialogs.enroll_dialog import EnrollDialog
+
+
+ENROLLMENT_STATUS_LABELS = {
+    "pending": "待确认",
+    "confirmed": "已确认",
+    "checked_in": "已签到",
+    "completed": "已完成",
+    "cancelled": "已取消",
+    "released": "已释放"
+}
+
+SCHEDULE_STATUS_LABELS = {
+    "scheduled": "待上课",
+    "in_progress": "进行中",
+    "completed": "已完成",
+    "cancelled": "已取消"
+}
 
 
 class ScheduleTab(QWidget):
@@ -18,6 +35,7 @@ class ScheduleTab(QWidget):
         self.recommender = recommender
         self.waitlist = waitlist
         self.current_schedules = []
+        self.current_enrollments = []
         self._init_ui()
         self.load_data()
 
@@ -42,7 +60,9 @@ class ScheduleTab(QWidget):
 
         filter_layout.addWidget(QLabel("状态:"))
         self.status_combo = QComboBox()
-        self.status_combo.addItems(["全部", "scheduled", "in_progress", "completed", "cancelled"])
+        for key, label in SCHEDULE_STATUS_LABELS.items():
+            self.status_combo.addItem(label, key)
+        self.status_combo.insertItem(0, "全部", "all")
         filter_layout.addWidget(self.status_combo)
 
         filter_layout.addWidget(QLabel("琴室:"))
@@ -83,9 +103,9 @@ class ScheduleTab(QWidget):
         left_layout.addLayout(btn_layout)
 
         self.schedule_table = QTableWidget()
-        self.schedule_table.setColumnCount(7)
+        self.schedule_table.setColumnCount(8)
         self.schedule_table.setHorizontalHeaderLabels([
-            "ID", "课程名称", "类型", "琴室", "老师", "时间", "人数"
+            "ID", "课程名称", "类型", "琴室", "老师", "时间", "人数", "状态"
         ])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.schedule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -101,11 +121,11 @@ class ScheduleTab(QWidget):
         info_group = QGroupBox("课程详情")
         info_layout = QFormLayout(info_group)
         self.detail_labels = {}
-        for key in ["course_name", "course_type", "room", "teacher", "time", "students", "status", "notes"]:
+        for key, label_text in [("course_name", "课程名称"), ("course_type", "课程类型"), ("room", "琴室"), ("teacher", "老师"), ("time", "时间"), ("students", "报名人数"), ("status", "课程状态"), ("notes", "备注")]:
             label = QLabel("-")
             label.setWordWrap(True)
             self.detail_labels[key] = label
-            info_layout.addRow(QLabel(f"{key}:"), label)
+            info_layout.addRow(QLabel(f"{label_text}:"), label)
         right_layout.addWidget(info_group)
 
         enroll_group = QGroupBox("已报名学员")
@@ -123,6 +143,10 @@ class ScheduleTab(QWidget):
         self.checkin_btn = QPushButton("签到")
         self.checkin_btn.clicked.connect(self.checkin_student)
         enroll_btn_layout.addWidget(self.checkin_btn)
+
+        self.complete_btn = QPushButton("完成")
+        self.complete_btn.clicked.connect(self.complete_enrollment)
+        enroll_btn_layout.addWidget(self.complete_btn)
 
         self.cancel_enroll_btn = QPushButton("取消")
         self.cancel_enroll_btn.clicked.connect(self.cancel_enrollment)
@@ -146,19 +170,15 @@ class ScheduleTab(QWidget):
         start_dt = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
         end_dt = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
 
-        status = self.status_combo.currentText()
-        if status == "全部":
-            status = None
+        status_data = self.status_combo.currentData()
+        status = None if status_data == "all" else status_data
 
         room_id = self.room_combo.currentData()
         teacher_id = self.teacher_combo.currentData()
 
         self.current_schedules = self.scheduler.get_schedules(
-            start_date=start_dt,
-            end_date=end_dt,
-            status=status,
-            room_id=room_id,
-            teacher_id=teacher_id
+            start_date=start_dt, end_date=end_dt, status=status,
+            room_id=room_id, teacher_id=teacher_id
         )
 
         self.schedule_table.setRowCount(len(self.current_schedules))
@@ -172,6 +192,7 @@ class ScheduleTab(QWidget):
             self.schedule_table.setItem(row, 5, QTableWidgetItem(time_str))
             students_str = f"{schedule.current_students}/{schedule.max_students}"
             self.schedule_table.setItem(row, 6, QTableWidgetItem(students_str))
+            self.schedule_table.setItem(row, 7, QTableWidgetItem(SCHEDULE_STATUS_LABELS.get(schedule.status, schedule.status)))
 
         self._update_detail_panel()
         self._load_enrollments()
@@ -223,23 +244,54 @@ class ScheduleTab(QWidget):
         time_str = f"{schedule.start_time.strftime('%Y-%m-%d %H:%M')} - {schedule.end_time.strftime('%H:%M')}"
         self.detail_labels["time"].setText(time_str)
         self.detail_labels["students"].setText(f"{schedule.current_students}/{schedule.max_students}")
-        self.detail_labels["status"].setText(schedule.status)
+        self.detail_labels["status"].setText(SCHEDULE_STATUS_LABELS.get(schedule.status, schedule.status))
         self.detail_labels["notes"].setText(schedule.notes or "-")
 
     def _load_enrollments(self):
         self.enrollment_list.clear()
         schedule = self._get_selected_schedule()
         if not schedule:
+            self.current_enrollments = []
             return
 
-        enrollments = self.scheduler.get_enrollments(schedule_id=schedule.id)
-        for enroll in enrollments:
-            student = self.scheduler.db.get_by_id(type(enroll.student), enroll.student_id)
-            if student:
-                text = f"[{enroll.status}] {student.name} - 报名:{enroll.enroll_time.strftime('%H:%M')}"
-                item = QListWidgetItem(text)
-                item.setData(Qt.UserRole, enroll.id)
-                self.enrollment_list.addItem(item)
+        self.current_enrollments = self.scheduler.get_enrollments(schedule_id=schedule.id)
+        for enroll in self.current_enrollments:
+            student = self.scheduler.db.get_by_id(Student, enroll.student_id)
+            status_label = ENROLLMENT_STATUS_LABELS.get(enroll.status, enroll.status)
+            time_parts = []
+            if enroll.enroll_time:
+                time_parts.append(f"报名:{enroll.enroll_time.strftime('%H:%M')}")
+            if enroll.confirm_time:
+                time_parts.append(f"确认:{enroll.confirm_time.strftime('%H:%M')}")
+            if enroll.checkin_time:
+                time_parts.append(f"签到:{enroll.checkin_time.strftime('%H:%M')}")
+            time_str = " ".join(time_parts) if time_parts else ""
+            name = student.name if student else "未知"
+            text = f"[{status_label}] {name} - {time_str}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, enroll.id)
+            self.enrollment_list.addItem(item)
+
+        self._update_enrollment_buttons()
+
+    def _update_enrollment_buttons(self):
+        enroll_id = self._get_selected_enrollment()
+        self.confirm_btn.setEnabled(False)
+        self.checkin_btn.setEnabled(False)
+        self.complete_btn.setEnabled(False)
+
+        if not enroll_id:
+            return
+
+        for enroll in self.current_enrollments:
+            if enroll.id == enroll_id:
+                status = enroll.status
+                self.confirm_btn.setEnabled(status == "pending")
+                self.checkin_btn.setEnabled(status == "confirmed")
+                self.complete_btn.setEnabled(status == "checked_in")
+                can_cancel = status in ["pending", "confirmed", "checked_in"]
+                self.cancel_enroll_btn.setEnabled(can_cancel)
+                break
 
     def add_schedule(self):
         dialog = ScheduleDialog(self.scheduler, self)
@@ -252,7 +304,6 @@ class ScheduleTab(QWidget):
         if not schedule:
             QMessageBox.warning(self, "提示", "请先选择要编辑的课程")
             return
-
         dialog = ScheduleDialog(self.scheduler, self, schedule)
         if dialog.exec() == QDialog.Accepted:
             self.load_data()
@@ -263,7 +314,6 @@ class ScheduleTab(QWidget):
         if not schedule:
             QMessageBox.warning(self, "提示", "请先选择要删除的课程")
             return
-
         reply = QMessageBox.question(self, "确认", f"确定要删除课程「{schedule.course_name}」吗？")
         if reply == QMessageBox.Yes:
             if self.scheduler.delete_schedule(schedule.id):
@@ -275,10 +325,8 @@ class ScheduleTab(QWidget):
         if not schedule:
             QMessageBox.warning(self, "提示", "请先选择课程")
             return
-
         if schedule.current_students >= schedule.max_students:
             QMessageBox.warning(self, "提示", "课程已满，学员将加入候补队列")
-
         dialog = EnrollDialog(self.scheduler, self.recommender, self.waitlist, schedule, self)
         if dialog.exec() == QDialog.Accepted:
             self.load_data()
@@ -295,29 +343,57 @@ class ScheduleTab(QWidget):
         if not enroll_id:
             QMessageBox.warning(self, "提示", "请先选择要确认的报名记录")
             return
-
-        if self.scheduler.confirm_enrollment(enroll_id):
-            self.load_data()
-            QMessageBox.information(self, "成功", "确认成功")
+        try:
+            result = self.scheduler.confirm_enrollment(enroll_id)
+            if result:
+                self.load_data()
+                QMessageBox.information(self, "成功", "已确认报名")
+            else:
+                QMessageBox.warning(self, "失败", "确认失败")
+        except ValueError as e:
+            QMessageBox.warning(self, "操作无效", str(e))
 
     def checkin_student(self):
         enroll_id = self._get_selected_enrollment()
         if not enroll_id:
             QMessageBox.warning(self, "提示", "请先选择要签到的报名记录")
             return
+        try:
+            result = self.scheduler.checkin_student(enroll_id)
+            if result:
+                self.load_data()
+                QMessageBox.information(self, "成功", "签到成功")
+            else:
+                QMessageBox.warning(self, "失败", "签到失败")
+        except ValueError as e:
+            QMessageBox.warning(self, "操作无效", str(e))
 
-        if self.scheduler.checkin_student(enroll_id):
-            self.load_data()
-            QMessageBox.information(self, "成功", "签到成功")
+    def complete_enrollment(self):
+        enroll_id = self._get_selected_enrollment()
+        if not enroll_id:
+            QMessageBox.warning(self, "提示", "请先选择要完成的报名记录")
+            return
+        try:
+            result = self.scheduler.complete_enrollment(enroll_id)
+            if result:
+                self.load_data()
+                QMessageBox.information(self, "成功", "已标记完成")
+            else:
+                QMessageBox.warning(self, "失败", "操作失败")
+        except ValueError as e:
+            QMessageBox.warning(self, "操作无效", str(e))
 
     def cancel_enrollment(self):
         enroll_id = self._get_selected_enrollment()
         if not enroll_id:
             QMessageBox.warning(self, "提示", "请先选择要取消的报名记录")
             return
-
-        reply = QMessageBox.question(self, "确认", "确定要取消该报名吗？")
+        reply = QMessageBox.question(self, "确认", "确定要取消该报名吗？取消后名额将释放给候补学员。")
         if reply == QMessageBox.Yes:
-            if self.scheduler.cancel_enrollment(enroll_id):
-                self.load_data()
-                QMessageBox.information(self, "成功", "已取消")
+            try:
+                result = self.scheduler.cancel_enrollment(enroll_id)
+                if result:
+                    self.load_data()
+                    QMessageBox.information(self, "成功", "已取消报名，名额已释放")
+            except ValueError as e:
+                QMessageBox.warning(self, "操作无效", str(e))
