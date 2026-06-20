@@ -383,11 +383,77 @@ def test_all():
                     canceled = scheduler.cancel_enrollment(enrolls[0].id)
                     print(f"   取消成功: {canceled is not None}")
 
-                    print(f"   通过notify_with_result获取精确通知...")
-                    notify = waitlist.notify_with_result(test_sched.id, notify_source="cancel_release")
-                    print(f"   补位来源: {notify['source']}, 实际通知: {notify['count']}人")
-                    if notify['student_names']:
-                        print(f"   实际收到邀请: {', '.join(notify['student_names'])}")
+                    notify_result = scheduler._last_cancel_notify_result
+                    if notify_result:
+                        print(f"   回调返回通知: {notify_result['count']}人")
+                        print(f"   补位来源: {notify_result['source']}")
+                        print(f"   实际收到邀请: {', '.join(notify_result['student_names'])}")
+                    else:
+                        print(f"   无候补学员被通知（可能无人在排队）")
+
+        print("\n16. 测试全部取消后进度显示...")
+        all_scheds = scheduler.get_schedules()
+        cancel_test_sched = None
+        for s in all_scheds:
+            sf = scheduler.get_schedule_by_id(s.id)
+            if sf and sf.max_students >= 2 and sf.status == "scheduled":
+                cancel_test_sched = sf
+                break
+
+        if cancel_test_sched and len(students) >= 2:
+            enrolls_before = scheduler.get_enrollments(schedule_id=cancel_test_sched.id,
+                status=["pending", "confirmed", "checked_in", "completed"])
+            for e in enrolls_before:
+                try:
+                    scheduler.cancel_enrollment(e.id)
+                except ValueError:
+                    pass
+
+            test_s1 = None
+            test_s2 = None
+            for stu in students:
+                existing = scheduler.get_enrollments(schedule_id=cancel_test_sched.id,
+                    status=["pending", "confirmed", "checked_in"])
+                if len(existing) < 2:
+                    try:
+                        e = scheduler.enroll_student(cancel_test_sched.id, stu.id)
+                        scheduler.confirm_enrollment(e.id)
+                    except ValueError:
+                        pass
+
+            enrolls = scheduler.get_enrollments(schedule_id=cancel_test_sched.id,
+                status=["confirmed", "checked_in"])
+            print(f"   课程: {cancel_test_sched.course_name}, 已报名{len(enrolls)}人")
+
+            for e in enrolls:
+                try:
+                    scheduler.cancel_enrollment(e.id)
+                except ValueError:
+                    pass
+
+            progress = scheduler.get_schedule_progress(cancel_test_sched.id)
+            print(f"   全部取消后进度: {progress['progress_status']} ({progress['progress_value']:.1f}%)")
+            print(f"   取消人数: {progress['cancelled_count']}")
+            all_cancel_ok = progress['progress_status'] == "全部取消"
+            print(f"   全部取消显示验证: {'通过' if all_cancel_ok else '失败 - 显示为' + progress['progress_status']}")
+
+        print("\n17. 测试数据库迁移（不删库升级）...")
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(db.engine)
+        sched_cols = {col["name"] for col in inspector.get_columns("schedules")}
+        waitlist_cols = {col["name"] for col in inspector.get_columns("waitlist")}
+        archive_cols = {col["name"] for col in inspector.get_columns("archives")}
+        new_sched_fields = {"lesson_content", "teacher_review", "next_homework", "suggested_pieces", "reviewed_at"}
+        new_waitlist_fields = {"notify_source"}
+        new_archive_fields = {"lesson_content", "teacher_review", "next_homework", "suggested_pieces",
+                              "enroll_time", "confirm_time", "checkin_time", "complete_time", "cancel_time"}
+        sched_ok = new_sched_fields.issubset(sched_cols)
+        waitlist_ok = new_waitlist_fields.issubset(waitlist_cols)
+        archive_ok = new_archive_fields.issubset(archive_cols)
+        print(f"   Schedule新字段完整: {'通过' if sched_ok else '失败'}")
+        print(f"   Waitlist新字段完整: {'通过' if waitlist_ok else '失败'}")
+        print(f"   Archive新字段完整: {'通过' if archive_ok else '失败'}")
+        print(f"   数据库迁移验证: {'通过' if (sched_ok and waitlist_ok and archive_ok) else '失败'}")
 
         print("\n" + "=" * 60)
         print("所有测试通过!")

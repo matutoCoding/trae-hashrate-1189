@@ -298,6 +298,27 @@ class ArchiveTab(QWidget):
 
         right_layout.addWidget(timeline_group)
 
+        lesson_progress_group = QGroupBox("课程整体进度")
+        lesson_progress_layout = QFormLayout(lesson_progress_group)
+        self.lesson_progress_labels = {}
+        lesson_progress_items = [
+            ("progress_status", "整体状态"),
+            ("total_enrolled", "报名总人数"),
+            ("completed_count", "已完成"),
+            ("checked_in_count", "已签到"),
+            ("confirmed_count", "已确认"),
+            ("pending_count", "待确认"),
+            ("cancelled_count", "已取消/释放"),
+            ("completion_rate", "完成度"),
+        ]
+        for key, label_text in lesson_progress_items:
+            label = QLabel("-")
+            label.setWordWrap(True)
+            self.lesson_progress_labels[key] = label
+            lesson_progress_layout.addRow(QLabel(f"{label_text}:"), label)
+
+        right_layout.addWidget(lesson_progress_group)
+
         review_group = QGroupBox("课后复盘记录")
         review_layout = QFormLayout(review_group)
         self.review_labels = {}
@@ -650,7 +671,74 @@ class ArchiveTab(QWidget):
             val = getattr(archive, key, None)
             self.review_labels[key].setText(val or "（暂无记录）")
 
+        self._load_lesson_progress(archive)
+
         self._load_recommended_music(archive)
+
+    def _load_lesson_progress(self, archive):
+        for key in self.lesson_progress_labels:
+            self.lesson_progress_labels[key].setText("-")
+
+        schedule_id = archive.schedule_id
+        if not schedule_id:
+            return
+
+        def query(session):
+            return session.query(Archive).filter(Archive.schedule_id == schedule_id).all()
+
+        try:
+            all_archives = self.scheduler.db.execute_query(query)
+        except Exception:
+            return
+
+        if not all_archives:
+            return
+
+        total = len(all_archives)
+        completed = len([a for a in all_archives if a.status == "completed"])
+        checked_in = len([a for a in all_archives if a.status == "checked_in"])
+        confirmed = len([a for a in all_archives if a.status == "confirmed"])
+        pending = len([a for a in all_archives if a.status == "pending"])
+        cancelled = len([a for a in all_archives if a.status in ["cancelled", "released"]])
+        active = total - cancelled
+
+        if cancelled == total and total > 0:
+            progress_status = "全部取消"
+            completion_rate = 0.0
+        elif active > 0:
+            if completed == active:
+                progress_status = "全部完成"
+                completion_rate = 100.0
+            elif checked_in + completed > 0:
+                progress_status = "上课中"
+                completion_rate = round(((checked_in + completed) / active) * 100, 1)
+            elif confirmed > 0:
+                progress_status = "已确认待上课"
+                completion_rate = round((confirmed / active) * 30, 1)
+            elif pending > 0:
+                progress_status = "待确认"
+                completion_rate = round((pending / active) * 10, 1)
+            else:
+                progress_status = "未开始"
+                completion_rate = 0.0
+        else:
+            progress_status = "未开始"
+            completion_rate = 0.0
+
+        self.lesson_progress_labels["progress_status"].setText(progress_status)
+        if progress_status == "全部取消":
+            self.lesson_progress_labels["progress_status"].setStyleSheet("font-weight: bold; color: #F44336;")
+        elif progress_status == "全部完成":
+            self.lesson_progress_labels["progress_status"].setStyleSheet("font-weight: bold; color: #4CAF50;")
+        else:
+            self.lesson_progress_labels["progress_status"].setStyleSheet("font-weight: bold;")
+        self.lesson_progress_labels["total_enrolled"].setText(str(total))
+        self.lesson_progress_labels["completed_count"].setText(str(completed))
+        self.lesson_progress_labels["checked_in_count"].setText(str(checked_in))
+        self.lesson_progress_labels["confirmed_count"].setText(str(confirmed))
+        self.lesson_progress_labels["pending_count"].setText(str(pending))
+        self.lesson_progress_labels["cancelled_count"].setText(str(cancelled))
+        self.lesson_progress_labels["completion_rate"].setText(f"{completion_rate:.1f}%")
 
     def _load_recommended_music(self, archive):
         self.recommended_music_list.setRowCount(0)

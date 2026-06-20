@@ -368,7 +368,15 @@ class ScheduleTab(QWidget):
             self._progress_cache[schedule.id] = progress
             self.progress_status_label.setText(progress["progress_status"])
             self.progress_bar.setValue(int(progress["progress_value"]))
-            self.progress_count_label.setText(f"{progress['completed_count']}/{progress['active_students']} 已完成")
+            if progress["progress_status"] == "全部取消":
+                self.progress_count_label.setText(f"全部取消 ({progress['cancelled_count']}人)")
+                self.progress_bar.setStyleSheet("QProgressBar::chunk { background: #F44336; }")
+            elif progress["progress_status"] == "全部完成":
+                self.progress_count_label.setText(f"{progress['completed_count']}/{progress['active_students']} 已完成")
+                self.progress_bar.setStyleSheet("QProgressBar::chunk { background: #4CAF50; }")
+            else:
+                self.progress_count_label.setText(f"{progress['completed_count']}/{progress['active_students']} 已完成")
+                self.progress_bar.setStyleSheet("")
             breakdown_parts = []
             if progress["confirmed_count"]:
                 breakdown_parts.append(f"已确认{progress['confirmed_count']}人")
@@ -391,6 +399,10 @@ class ScheduleTab(QWidget):
         else:
             self.progress_status_label.setText("-")
             self.progress_bar.setValue(0)
+            self.progress_bar.setStyleSheet("")
+            self.progress_count_label.setText("")
+            self.breakdown_label.setText("")
+            self.review_hint_label.setText("")
 
     def _load_enrollments(self):
         self.enrollment_list.clear()
@@ -566,20 +578,18 @@ class ScheduleTab(QWidget):
                     self.load_data()
                     self._trigger_callback()
 
-                    if schedule_id:
-                        notify_result = self.waitlist.notify_with_result(schedule_id, notify_source="cancel_release")
-                        count = notify_result.get("count", 0)
+                    notify_result = self.scheduler._last_cancel_notify_result
+                    if notify_result and notify_result.get("count", 0) > 0:
+                        count = notify_result["count"]
                         names = notify_result.get("student_names", [])
-                        if count > 0:
-                            msg = f"已释放名额。实际通知 {count} 名候补学员：\n\n"
-                            msg += "\n".join([f"  • {n}" for n in names])
-                            msg += f"\n\n补位来源：{NOTIFY_SOURCE_LABELS.get('cancel_release', '取消释放')}"
-                            QMessageBox.information(self, "补位通知已发出", msg)
-                        else:
-                            QMessageBox.information(self, "成功",
-                                "已取消报名，名额已释放。\n\n暂无等待中的候补学员。")
+                        source_label = NOTIFY_SOURCE_LABELS.get(notify_result.get("source", ""), "取消释放")
+                        msg = f"已释放名额。实际通知 {count} 名候补学员：\n\n"
+                        msg += "\n".join([f"  • {n}" for n in names])
+                        msg += f"\n\n补位来源：{source_label}"
+                        QMessageBox.information(self, "补位通知已发出", msg)
                     else:
-                        QMessageBox.information(self, "成功", "已取消报名，名额已释放")
+                        QMessageBox.information(self, "成功",
+                            "已取消报名，名额已释放。\n\n暂无等待中的候补学员。")
             except ValueError as e:
                 QMessageBox.warning(self, "操作无效", str(e))
 

@@ -1,10 +1,34 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, joinedload, selectinload
 from pathlib import Path
 from .models import Base
 
 
 class DatabaseManager:
+    SCHEMA_MIGRATIONS = {
+        "schedules": [
+            ("lesson_content", "TEXT"),
+            ("teacher_review", "TEXT"),
+            ("next_homework", "TEXT"),
+            ("suggested_pieces", "TEXT"),
+            ("reviewed_at", "DATETIME"),
+        ],
+        "waitlist": [
+            ("notify_source", "VARCHAR(30)"),
+        ],
+        "archives": [
+            ("lesson_content", "TEXT"),
+            ("teacher_review", "TEXT"),
+            ("next_homework", "TEXT"),
+            ("suggested_pieces", "TEXT"),
+            ("enroll_time", "DATETIME"),
+            ("confirm_time", "DATETIME"),
+            ("checkin_time", "DATETIME"),
+            ("complete_time", "DATETIME"),
+            ("cancel_time", "DATETIME"),
+        ],
+    }
+
     def __init__(self, db_path=None):
         if db_path:
             self.db_path = Path(db_path)
@@ -21,6 +45,20 @@ class DatabaseManager:
 
     def init_db(self):
         Base.metadata.create_all(bind=self.engine)
+        self._migrate_db()
+
+    def _migrate_db(self):
+        inspector = inspect(self.engine)
+        existing_tables = inspector.get_table_names()
+        with self.engine.connect() as conn:
+            for table_name, columns in self.SCHEMA_MIGRATIONS.items():
+                if table_name not in existing_tables:
+                    continue
+                existing_cols = {col["name"] for col in inspector.get_columns(table_name)}
+                for col_name, col_type in columns:
+                    if col_name not in existing_cols:
+                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+            conn.commit()
 
     def get_session(self):
         return self.SessionLocal()

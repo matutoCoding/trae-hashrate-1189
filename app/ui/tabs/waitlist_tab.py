@@ -350,7 +350,7 @@ class WaitlistTab(QWidget):
             "拒绝后系统将自动通知下一位候补学员。")
         if reply == QMessageBox.Yes:
             if self.waitlist.decline_waitlist_offer(entry.id):
-                next_result = self.waitlist.notify_with_result(entry.schedule_id, notify_source="cancel_release")
+                next_result = self.waitlist.notify_with_result(entry.schedule_id, notify_source="manual")
                 next_names = next_result.get("student_names", [])
                 if next_names:
                     msg = f"{name} 已拒绝补位。\n\n系统已自动通知下一位候补：\n"

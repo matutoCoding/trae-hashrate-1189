@@ -38,6 +38,7 @@ class SchedulerService:
         self.settings = AppSettings()
         self._on_release_callback = None
         self._status_change_callback = None
+        self._last_cancel_notify_result = None
 
     def set_release_callback(self, callback):
         self._on_release_callback = callback
@@ -282,9 +283,22 @@ class SchedulerService:
             if schedule and schedule.current_students > 0:
                 schedule.current_students -= 1
                 self.db.update(schedule)
+            self._last_cancel_notify_result = None
             if self._on_release_callback:
                 try:
-                    self._on_release_callback(enrollment.schedule_id)
+                    cb_result = self._on_release_callback(enrollment.schedule_id, notify_source="cancel_release")
+                    if cb_result:
+                        student_names = []
+                        for entry in cb_result:
+                            stu = self.db.get_by_id(Student, entry.student_id)
+                            if stu:
+                                student_names.append(stu.name)
+                        self._last_cancel_notify_result = {
+                            "count": len(cb_result),
+                            "entries": cb_result,
+                            "student_names": student_names,
+                            "source": "cancel_release"
+                        }
                 except Exception:
                     pass
             if self._status_change_callback:
@@ -333,13 +347,13 @@ class SchedulerService:
             progress_status = "未开始"
             progress_value = 0.0
 
-            if active > 0:
+            if cancelled == total and total > 0:
+                progress_status = "全部取消"
+                progress_value = 0.0
+            elif active > 0:
                 if completed == active and active > 0:
                     progress_status = "全部完成"
                     progress_value = 100.0
-                elif cancelled == total and total > 0:
-                    progress_status = "全部取消"
-                    progress_value = 0.0
                 elif checked_in + completed > 0:
                     in_class = checked_in + completed
                     progress_status = "上课中" if checked_in > 0 else "已签到"
@@ -456,7 +470,7 @@ class SchedulerService:
         if released_schedule_ids and self._on_release_callback:
             for sid in set(released_schedule_ids):
                 try:
-                    self._on_release_callback(sid)
+                    self._on_release_callback(sid, notify_source="expired_release")
                 except Exception:
                     pass
 
