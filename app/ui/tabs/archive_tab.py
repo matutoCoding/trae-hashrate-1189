@@ -2,11 +2,11 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QComboBox, QDateEdit, QMessageBox, QHeaderView,
     QGroupBox, QFormLayout, QAbstractItemView, QSplitter, QTabWidget,
-    QProgressBar
+    QProgressBar, QFrame
 )
 from PySide6.QtCore import Qt, QDate
 from datetime import datetime
-from app.database.models import Archive, MusicPiece, Student, Teacher
+from app.database.models import Archive, MusicPiece, Enrollment
 
 
 ENROLLMENT_STATUS_LABELS = {
@@ -48,6 +48,38 @@ class ArchiveTab(QWidget):
         layout.addWidget(self.tabs)
 
     def _init_archive_ui(self, layout):
+        stats_group = QGroupBox("筛选统计")
+        stats_layout = QHBoxLayout(stats_group)
+
+        self.stats_widgets = {}
+        stat_configs = [
+            ("total_count", "总记录", "0"),
+            ("avg_score", "平均匹配分", "-"),
+            ("completed_count", "已完成", "0"),
+            ("cancelled_count", "已取消", "0"),
+            ("pending_count", "待确认/已签到", "0")
+        ]
+
+        for i, (key, label, default) in enumerate(stat_configs):
+            if i > 0:
+                line = QFrame()
+                line.setFrameShape(QFrame.VLine)
+                line.setFrameShadow(QFrame.Sunken)
+                stats_layout.addWidget(line)
+
+            box = QVBoxLayout()
+            value_label = QLabel(default)
+            value_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #1976D2;")
+            value_label.setAlignment(Qt.AlignCenter)
+            name_label = QLabel(label)
+            name_label.setAlignment(Qt.AlignCenter)
+            box.addWidget(value_label)
+            box.addWidget(name_label)
+            stats_layout.addLayout(box)
+            self.stats_widgets[key] = value_label
+
+        layout.addWidget(stats_group)
+
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("日期范围:"))
 
@@ -108,6 +140,9 @@ class ArchiveTab(QWidget):
         self.archive_table.itemSelectionChanged.connect(self._on_archive_selected)
         splitter.addWidget(self.archive_table)
 
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
         detail_group = QGroupBox("归档详情")
         detail_layout = QFormLayout(detail_group)
         self.archive_detail_labels = {}
@@ -147,8 +182,36 @@ class ArchiveTab(QWidget):
 
         detail_layout.addRow(score_group)
 
-        splitter.addWidget(detail_group)
-        splitter.setSizes([700, 500])
+        timeline_group = QGroupBox("报名过程")
+        timeline_layout = QFormLayout(timeline_group)
+        self.timeline_labels = {}
+        timeline_items = [
+            ("enroll_time", "报名时间"),
+            ("confirm_time", "确认时间"),
+            ("checkin_time", "签到时间"),
+            ("complete_time", "完成时间"),
+            ("cancel_time", "取消/释放时间")
+        ]
+        for key, label_text in timeline_items:
+            label = QLabel("-")
+            self.timeline_labels[key] = label
+            timeline_layout.addRow(QLabel(f"{label_text}:"), label)
+
+        right_layout.addWidget(detail_group)
+        right_layout.addWidget(timeline_group)
+
+        music_group = QGroupBox("推荐学习曲目")
+        music_layout = QVBoxLayout(music_group)
+        self.recommended_music_list = QTableWidget()
+        self.recommended_music_list.setColumnCount(4)
+        self.recommended_music_list.setHorizontalHeaderLabels(["曲目名称", "作曲家", "难度", "级别"])
+        self.recommended_music_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.recommended_music_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        music_layout.addWidget(self.recommended_music_list)
+        right_layout.addWidget(music_group, 1)
+
+        splitter.addWidget(right_panel)
+        splitter.setSizes([600, 600])
 
         layout.addWidget(splitter, 1)
 
@@ -256,7 +319,6 @@ class ArchiveTab(QWidget):
                 self.teacher_combo.setCurrentIndex(idx)
 
     def load_archives(self):
-        from app.database.models import Archive
         start_dt = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
         end_dt = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
 
@@ -287,6 +349,8 @@ class ArchiveTab(QWidget):
 
         self.current_archives = self.scheduler.db.execute_query(query)
 
+        self._update_statistics()
+
         self.archive_table.setRowCount(len(self.current_archives))
         for row, archive in enumerate(self.current_archives):
             self.archive_table.setItem(row, 0, QTableWidgetItem(str(archive.id)))
@@ -300,6 +364,31 @@ class ArchiveTab(QWidget):
             self.archive_table.setItem(row, 6, QTableWidgetItem(score))
             self.archive_table.setItem(row, 7, QTableWidgetItem(archive.student_style or "-"))
             self.archive_table.setItem(row, 8, QTableWidgetItem(archive.student_exam_level or "-"))
+
+    def _update_statistics(self):
+        archives = self.current_archives
+        total = len(archives)
+        self.stats_widgets["total_count"].setText(str(total))
+
+        if total > 0:
+            scores = [a.match_score for a in archives if a.match_score is not None]
+            if scores:
+                avg = sum(scores) / len(scores)
+                self.stats_widgets["avg_score"].setText(f"{avg:.2%}")
+            else:
+                self.stats_widgets["avg_score"].setText("-")
+
+            completed = len([a for a in archives if a.status == "completed"])
+            cancelled = len([a for a in archives if a.status in ["cancelled", "released"]])
+            pending = len([a for a in archives if a.status in ["pending", "confirmed", "checked_in"]])
+            self.stats_widgets["completed_count"].setText(str(completed))
+            self.stats_widgets["cancelled_count"].setText(str(cancelled))
+            self.stats_widgets["pending_count"].setText(str(pending))
+        else:
+            self.stats_widgets["avg_score"].setText("-")
+            self.stats_widgets["completed_count"].setText("0")
+            self.stats_widgets["cancelled_count"].setText("0")
+            self.stats_widgets["pending_count"].setText("0")
 
     def _on_archive_selected(self):
         current_row = self.archive_table.currentRow()
@@ -331,6 +420,77 @@ class ArchiveTab(QWidget):
             else:
                 val_label.setText("-")
                 bar.setValue(0)
+
+        for key in ["enroll_time", "confirm_time", "checkin_time", "complete_time", "cancel_time"]:
+            self.timeline_labels[key].setText("-")
+
+        def query_timeline(session):
+            if archive.schedule_id and archive.student_id:
+                return session.query(Enrollment).filter(
+                    Enrollment.schedule_id == archive.schedule_id,
+                    Enrollment.student_id == archive.student_id
+                ).first()
+            return None
+
+        enrollment = self.scheduler.db.execute_query(query_timeline)
+        if enrollment:
+            timeline_keys = [
+                ("enroll_time", enrollment.enroll_time),
+                ("confirm_time", enrollment.confirm_time),
+                ("checkin_time", enrollment.checkin_time),
+                ("complete_time", enrollment.complete_time),
+                ("cancel_time", enrollment.cancel_time)
+            ]
+            for key, val in timeline_keys:
+                if val:
+                    self.timeline_labels[key].setText(val.strftime("%Y-%m-%d %H:%M:%S"))
+
+        self._load_recommended_music(archive)
+
+    def _load_recommended_music(self, archive):
+        self.recommended_music_list.setRowCount(0)
+
+        student_style = archive.student_style or ""
+        student_level = archive.student_level or ""
+        student_exam_level = archive.student_exam_level or ""
+
+        all_pieces = self.scheduler.get_all_music_pieces()
+
+        matched = []
+        for piece in all_pieces:
+            score = 0
+            if student_style and piece.style:
+                style_list = [s.strip() for s in student_style.split(",")]
+                if piece.style in style_list:
+                    score += 50
+                elif any(s in piece.style for s in style_list):
+                    score += 30
+
+            if student_level and piece.difficulty_level:
+                level_order = ["入门", "初级", "中级", "高级", "专业"]
+                try:
+                    si = level_order.index(student_level)
+                    pi = level_order.index(piece.difficulty_level)
+                    if abs(si - pi) <= 1:
+                        score += 30
+                except ValueError:
+                    pass
+
+            if student_exam_level and piece.exam_level:
+                if piece.exam_level == student_exam_level:
+                    score += 20
+
+            if score > 0:
+                matched.append((piece, score))
+
+        matched.sort(key=lambda x: x[1], reverse=True)
+
+        self.recommended_music_list.setRowCount(len(matched[:10]))
+        for row, (piece, score) in enumerate(matched[:10]):
+            self.recommended_music_list.setItem(row, 0, QTableWidgetItem(piece.name))
+            self.recommended_music_list.setItem(row, 1, QTableWidgetItem(piece.composer or "-"))
+            self.recommended_music_list.setItem(row, 2, QTableWidgetItem(piece.difficulty_level or "-"))
+            self.recommended_music_list.setItem(row, 3, QTableWidgetItem(piece.exam_level or "-"))
 
     def do_archive(self):
         count = self.scheduler.archive_completed_courses()

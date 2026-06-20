@@ -128,14 +128,17 @@ class WaitlistService:
         if schedule.current_students >= schedule.max_students:
             return []
 
-        available_slots = schedule.max_students - schedule.current_students
         waitlist_confirm_minutes = self.settings.get("waitlist_confirm_minutes", 30)
         notified = []
 
         def query(session):
+            effective_available = self._get_effective_available_slots(schedule_id, session)
+            if effective_available <= 0:
+                return []
+
             waiting_list = session.query(Waitlist).filter(
                 and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
-            ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(available_slots).all()
+            ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(effective_available).all()
 
             now = datetime.now()
             for entry in waiting_list:
@@ -148,6 +151,18 @@ class WaitlistService:
             session.commit()
             return notified
         return self.db.execute_query(query)
+
+    def _get_effective_available_slots(self, schedule_id, session):
+        schedule = session.query(Schedule).filter(Schedule.id == schedule_id).first()
+        if not schedule:
+            return 0
+
+        notified_count = session.query(Waitlist).filter(
+            and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "notified")
+        ).count()
+
+        effective_available = schedule.max_students - schedule.current_students - notified_count
+        return max(0, effective_available)
 
     def confirm_waitlist_enrollment(self, waitlist_id):
         waitlist = self.db.get_by_id(Waitlist, waitlist_id)
@@ -176,6 +191,7 @@ class WaitlistService:
             waitlist.enrolled_time = now
             self.db.update(waitlist)
             self._reorder_queue(waitlist.schedule_id)
+            self.auto_notify_next(waitlist.schedule_id)
             return enrollment
         except ValueError:
             return None
@@ -199,10 +215,13 @@ class WaitlistService:
         notified = []
 
         def query(session):
-            available = schedule.max_students - schedule.current_students
+            effective_available = self._get_effective_available_slots(schedule_id, session)
+            if effective_available <= 0:
+                return []
+
             waiting = session.query(Waitlist).filter(
                 and_(Waitlist.schedule_id == schedule_id, Waitlist.status == "waiting")
-            ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(available).all()
+            ).order_by(Waitlist.priority_score.desc(), Waitlist.created_at).limit(effective_available).all()
 
             now = datetime.now()
             for entry in waiting:

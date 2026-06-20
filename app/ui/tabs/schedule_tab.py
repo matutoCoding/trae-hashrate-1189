@@ -36,8 +36,12 @@ class ScheduleTab(QWidget):
         self.waitlist = waitlist
         self.current_schedules = []
         self.current_enrollments = []
+        self._after_enrollment_change_callback = None
         self._init_ui()
         self.load_data()
+
+    def set_after_enrollment_change_callback(self, callback):
+        self._after_enrollment_change_callback = callback
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -347,6 +351,8 @@ class ScheduleTab(QWidget):
             result = self.scheduler.confirm_enrollment(enroll_id)
             if result:
                 self.load_data()
+                if self._after_enrollment_change_callback:
+                    self._after_enrollment_change_callback()
                 QMessageBox.information(self, "成功", "已确认报名")
             else:
                 QMessageBox.warning(self, "失败", "确认失败")
@@ -362,6 +368,8 @@ class ScheduleTab(QWidget):
             result = self.scheduler.checkin_student(enroll_id)
             if result:
                 self.load_data()
+                if self._after_enrollment_change_callback:
+                    self._after_enrollment_change_callback()
                 QMessageBox.information(self, "成功", "签到成功")
             else:
                 QMessageBox.warning(self, "失败", "签到失败")
@@ -377,6 +385,8 @@ class ScheduleTab(QWidget):
             result = self.scheduler.complete_enrollment(enroll_id)
             if result:
                 self.load_data()
+                if self._after_enrollment_change_callback:
+                    self._after_enrollment_change_callback()
                 QMessageBox.information(self, "成功", "已标记完成")
             else:
                 QMessageBox.warning(self, "失败", "操作失败")
@@ -388,12 +398,26 @@ class ScheduleTab(QWidget):
         if not enroll_id:
             QMessageBox.warning(self, "提示", "请先选择要取消的报名记录")
             return
-        reply = QMessageBox.question(self, "确认", "确定要取消该报名吗？取消后名额将释放给候补学员。")
+        enrollment = self.scheduler.get_enrollment_by_id(enroll_id)
+        if not enrollment:
+            QMessageBox.warning(self, "提示", "报名记录不存在")
+            return
+        waitlist_count = len(self.waitlist.get_waitlist(schedule_id=enrollment.schedule_id, status="waiting"))
+        if waitlist_count > 0:
+            confirm_msg = f"确定要取消该报名吗？取消后将释放名额，系统将自动通知候补队列中的 {waitlist_count} 名学员。"
+        else:
+            confirm_msg = "确定要取消该报名吗？取消后名额将被释放。"
+        reply = QMessageBox.question(self, "确认", confirm_msg)
         if reply == QMessageBox.Yes:
             try:
                 result = self.scheduler.cancel_enrollment(enroll_id)
                 if result:
                     self.load_data()
-                    QMessageBox.information(self, "成功", "已取消报名，名额已释放")
+                    if self._after_enrollment_change_callback:
+                        self._after_enrollment_change_callback()
+                    if waitlist_count > 0:
+                        QMessageBox.information(self, "成功", f"已取消报名，名额已释放，已向 {waitlist_count} 名候补学员发送补位通知")
+                    else:
+                        QMessageBox.information(self, "成功", "已取消报名，名额已释放")
             except ValueError as e:
                 QMessageBox.warning(self, "操作无效", str(e))

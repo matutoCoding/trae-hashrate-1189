@@ -268,6 +268,11 @@ class SchedulerService:
             if schedule and schedule.current_students > 0:
                 schedule.current_students -= 1
                 self.db.update(schedule)
+            if self._on_release_callback:
+                try:
+                    self._on_release_callback(enrollment.schedule_id)
+                except Exception:
+                    pass
         return self.db.update(enrollment)
 
     def confirm_enrollment(self, enrollment_id):

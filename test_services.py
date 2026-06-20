@@ -182,9 +182,137 @@ def test_all():
                     matches = recommender.get_match_records(student_id=student.id)
                     print(f"   当前撮合记录数: {len(matches)}")
 
-        print("\n11. 测试归档功能...")
-        archived = scheduler.archive_completed_courses()
-        print(f"    本次归档课程数: {archived}")
+        print("\n11. 测试取消报名后自动联动候补...")
+        if schedules and len(students) >= 4:
+            all_schedules = scheduler.get_schedules()
+            test_schedule = None
+            for s in all_schedules:
+                s_fresh = scheduler.get_schedule_by_id(s.id)
+                if s_fresh and s_fresh.current_students < s_fresh.max_students:
+                    test_schedule = s_fresh
+                    break
+
+            if not test_schedule and len(all_schedules) > 1:
+                for s in all_schedules:
+                    s_fresh = scheduler.get_schedule_by_id(s.id)
+                    if s_fresh and s_fresh.max_students >= 2:
+                        test_schedule = s_fresh
+                        enrolls = scheduler.get_enrollments(schedule_id=s_fresh.id, status=["confirmed", "pending", "checked_in"])
+                        for e in enrolls[:1]:
+                            scheduler.cancel_enrollment(e.id)
+                        test_schedule = scheduler.get_schedule_by_id(s_fresh.id)
+                        break
+
+            if test_schedule:
+                s1 = students[0]
+                s2 = students[1]
+                s3 = students[2]
+                print(f"   课程: {test_schedule.course_name}, 名额: {test_schedule.max_students}")
+                print(f"   当前人数: {test_schedule.current_students}")
+
+                print(f"   学员 {s1.name} 报名并确认...")
+                enroll1 = scheduler.enroll_student(test_schedule.id, s1.id)
+                conf1 = scheduler.confirm_enrollment(enroll1.id)
+                sched_after = scheduler.get_schedule_by_id(test_schedule.id)
+                print(f"   确认后人数: {sched_after.current_students}")
+
+                if test_schedule.max_students >= 2:
+                    print(f"   学员 {s2.name} 报名并确认...")
+                    enroll2 = scheduler.enroll_student(test_schedule.id, s2.id)
+                    conf2 = scheduler.confirm_enrollment(enroll2.id)
+
+                print(f"   学员 {s3.name} 加入候补...")
+                wl1 = waitlist.add_to_waitlist(test_schedule.id, s3.id, priority_score=80.0)
+
+                if len(students) >= 5:
+                    s4 = students[3]
+                    print(f"   学员 {s4.name} 加入候补...")
+                    wl2 = waitlist.add_to_waitlist(test_schedule.id, s4.id, priority_score=60.0)
+
+                print(f"   取消学员 {s1.name} 的报名...")
+                scheduler.cancel_enrollment(conf1.id)
+                sched_after_cancel = scheduler.get_schedule_by_id(test_schedule.id)
+                print(f"   取消后人数: {sched_after_cancel.current_students}")
+
+                notified = waitlist.get_notified_with_remaining(test_schedule.id)
+                print(f"   自动通知候补人数: {len(notified)}")
+                for item in notified:
+                    entry = item['entry']
+                    stu = scheduler.db.get_by_id(__import__('app.database.models', fromlist=['Student']).Student, entry.student_id)
+                    print(f"     - {stu.name if stu else '?'}, 优先级: {entry.priority_score}, 剩余: {item['remaining_seconds']:.0f}秒")
+            else:
+                print("   找不到合适的测试课程，跳过")
+
+        print("\n12. 测试候补邀请不超发（已通知未确认也算占位）...")
+        if schedules and len(students) >= 3:
+            all_scheds = scheduler.get_schedules()
+            test_schedule = None
+            for s in all_scheds:
+                sf = scheduler.get_schedule_by_id(s.id)
+                if sf and sf.max_students >= 3:
+                    test_schedule = sf
+                    enrolls = scheduler.get_enrollments(schedule_id=sf.id, status=["confirmed", "pending", "checked_in"])
+                    for e in enrolls:
+                        scheduler.cancel_enrollment(e.id)
+                    test_schedule = scheduler.get_schedule_by_id(sf.id)
+                    break
+
+            if test_schedule:
+                print(f"   测试课程: {test_schedule.course_name}, 最大名额: {test_schedule.max_students}")
+                print(f"   当前人数: {test_schedule.current_students}")
+
+                s_list = students[:4]
+                for i, s in enumerate(s_list):
+                    try:
+                        waitlist.add_to_waitlist(test_schedule.id, s.id, priority_score=100 - i * 10)
+                        print(f"   学员 {s.name} 加入候补")
+                    except ValueError:
+                        pass
+
+                print(f"   尝试通知候补（名额只2个）...")
+                # 先给2人报名确认，只留2个空位
+                if test_schedule.max_students >= 4:
+                    for s in students[:2]:
+                        try:
+                            e = scheduler.enroll_student(test_schedule.id, s.id)
+                            scheduler.confirm_enrollment(e.id)
+                        except ValueError:
+                            pass
+
+                test_schedule = scheduler.get_schedule_by_id(test_schedule.id)
+                available = test_schedule.max_students - test_schedule.current_students
+                print(f"   剩余空位: {available}")
+
+                notified = waitlist.process_waitlist_for_schedule(test_schedule.id)
+                print(f"   实际可通知: {available}, 实际通知: {len(notified)}")
+                print(f"   不超发验证: {'通过' if len(notified) <= available else '失败 - 超发了!'}")
+
+                print(f"   再次尝试通知（有未确认的）...")
+                notified2 = waitlist.auto_notify_next(test_schedule.id)
+                print(f"   第二次通知: {len(notified2)} 人 (应为0, 因为已通知未确认也算占位)")
+            else:
+                print("   找不到合适的测试课程，跳过")
+
+        print("\n13. 测试归档统计...")
+        scheduler.archive_completed_courses()
+        from app.database.models import Archive
+
+        def query(session):
+            all_archives = session.query(Archive).all()
+            if all_archives:
+                total = len(all_archives)
+                scores = [a.match_score for a in all_archives if a.match_score]
+                avg_score = sum(scores) / len(scores) if scores else 0
+                completed = len([a for a in all_archives if a.status == "completed"])
+                cancelled = len([a for a in all_archives if a.status in ["cancelled", "released"]])
+                print(f"   总归档记录: {total}")
+                print(f"   平均匹配分: {avg_score:.2%}")
+                print(f"   已完成: {completed}")
+                print(f"   已取消/释放: {cancelled}")
+            return len(all_archives)
+
+        count = db.execute_query(query)
+        print(f"   共 {count} 条归档记录")
 
         print("\n" + "=" * 60)
         print("所有测试通过!")

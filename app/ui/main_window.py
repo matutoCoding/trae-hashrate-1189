@@ -84,6 +84,8 @@ class MainWindow(QMainWindow):
         self.archive_tab = ArchiveTab(self.scheduler, self.recommender)
         self.settings_tab = SettingsTab(self.settings, self.recommender)
 
+        self.schedule_tab.set_after_enrollment_change_callback(self._on_enrollment_data_changed)
+
         self.tabs.addTab(self.schedule_tab, "课程排期")
         self.tabs.addTab(self.waitlist_tab, "候补补位")
         self.tabs.addTab(self.recommend_tab, "多维推荐")
@@ -95,6 +97,11 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("系统就绪")
+
+    def _on_enrollment_data_changed(self):
+        self.waitlist_tab.load_data()
+        self.archive_tab.load_archives()
+        self.status_bar.showMessage("数据已同步更新", 3000)
 
     def _init_timer(self):
         self.check_timer = QTimer(self)
